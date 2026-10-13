@@ -743,15 +743,39 @@ export default function CitizenPortal({
     }
   }, [detectedService]);
 
-  // Initialize SpeechSynthesis voices list
+  // Initialize SpeechSynthesis voices list & unlock browser audio context on first user interaction
   useEffect(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       const loadVoices = () => {
-        window.speechSynthesis.getVoices();
+        try {
+          window.speechSynthesis.getVoices();
+        } catch (e) {}
       };
       loadVoices();
       window.speechSynthesis.onvoiceschanged = loadVoices;
     }
+
+    // Modern browsers require a user gesture (click/touch) to enable audio output
+    const unlockAudio = () => {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try {
+          // Speak a silent micro-utterance to unlock speech synthesis on iOS/Safari/Chrome
+          const silentUtterance = new SpeechSynthesisUtterance(' ');
+          silentUtterance.volume = 0.01;
+          window.speechSynthesis.speak(silentUtterance);
+        } catch (e) {}
+      }
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+    };
+
+    window.addEventListener('click', unlockAudio, { once: true });
+    window.addEventListener('touchstart', unlockAudio, { once: true });
+
+    return () => {
+      window.removeEventListener('click', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+    };
   }, []);
 
   // Primary Vietnamese Voice Assistant Speaker Engine
@@ -780,48 +804,62 @@ export default function CitizenPortal({
       } catch (e) {}
     }
 
-    // Fallback using Web Speech API ONLY if explicit Vietnamese voice is present
+    // Universal Speech Fallback for static hosting like Netlify (without backend server /api/tts)
     const fallbackWebSpeech = () => {
-      if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-        setIsSpeaking(false);
-        return;
+      // Step A: Try Web Speech API (works 100% locally on Chrome, Safari, Edge, Android, iOS)
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        try {
+          const voices = window.speechSynthesis.getVoices();
+          // Find Vietnamese voice or general voice
+          const viVoice = voices.find(
+            (v) =>
+              v.lang.toLowerCase().startsWith('vi') ||
+              v.lang.toLowerCase().includes('vi-vn') ||
+              v.name.toLowerCase().includes('vietnam') ||
+              v.name.toLowerCase().includes('vietnamese')
+          );
+
+          const utterance = new SpeechSynthesisUtterance(cleanText);
+          if (viVoice) {
+            utterance.voice = viVoice;
+          }
+          utterance.lang = 'vi-VN';
+          utterance.rate = 1.0;
+          utterance.pitch = 1.0;
+          utterance.onend = () => setIsSpeaking(false);
+          utterance.onerror = () => {
+            // If WebSpeech fails, fallback to client-side Google TTS audio
+            tryDirectGoogleTts();
+          };
+          window.speechSynthesis.speak(utterance);
+          return;
+        } catch (e) {
+          console.warn('SpeechSynthesis invocation error:', e);
+        }
       }
 
-      const voices = window.speechSynthesis.getVoices();
-      const viVoice = voices.find(
-        (v) =>
-          v.lang.toLowerCase().startsWith('vi') ||
-          v.lang.toLowerCase().includes('vi-vn') ||
-          v.name.toLowerCase().includes('vietnam') ||
-          v.name.toLowerCase().includes('vietnamese')
-      );
+      // Step B: Direct client-side Google Vietnamese audio stream
+      tryDirectGoogleTts();
+    };
 
-      // CRITICAL: Only call SpeechSynthesis if a native Vietnamese voice exists on user's device!
-      // NEVER allow English voice to read Vietnamese text!
-      if (viVoice) {
-        const utterance = new SpeechSynthesisUtterance(cleanText);
-        utterance.voice = viVoice;
-        utterance.lang = 'vi-VN';
-        utterance.rate = 0.95;
-        utterance.onend = () => setIsSpeaking(false);
-        utterance.onerror = () => setIsSpeaking(false);
-        window.speechSynthesis.speak(utterance);
-      } else {
-        // Direct client fallback to Google Translate Vietnamese Audio stream
-        try {
-          const directUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${encodeURIComponent(cleanText.slice(0, 300))}`;
-          const directAudio = new Audio(directUrl);
-          currentAudioRef.current = directAudio;
-          directAudio.onended = () => setIsSpeaking(false);
-          directAudio.onerror = () => setIsSpeaking(false);
-          directAudio.play().catch(() => setIsSpeaking(false));
-        } catch (e) {
-          setIsSpeaking(false);
+    const tryDirectGoogleTts = () => {
+      try {
+        const directUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${encodeURIComponent(cleanText.slice(0, 300))}`;
+        const directAudio = new Audio(directUrl);
+        currentAudioRef.current = directAudio;
+        directAudio.onended = () => setIsSpeaking(false);
+        directAudio.onerror = () => setIsSpeaking(false);
+        const p = directAudio.play();
+        if (p !== undefined) {
+          p.catch(() => setIsSpeaking(false));
         }
+      } catch (e) {
+        setIsSpeaking(false);
       }
     };
 
-    // Primary voice engine: Call server /api/tts endpoint (fetches authentic Google Vietnamese voice MP3)
+    // Primary engine: Test if backend /api/tts exists (AI Studio dev/fullstack environment)
+    // If running on static host (Netlify/Vercel/GitHub Pages) where /api/tts returns 404 HTML, immediately use fallbackWebSpeech
     try {
       const serverTtsUrl = `/api/tts?text=${encodeURIComponent(cleanText.slice(0, 450))}`;
       const audio = new Audio(serverTtsUrl);
@@ -835,7 +873,7 @@ export default function CitizenPortal({
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
-          console.warn('Auto-play prevented or audio fetch issue, using fallback:', err);
+          console.warn('Backend audio play error (likely Netlify static hosting), switching to client speech engine:', err);
           fallbackWebSpeech();
         });
       }
