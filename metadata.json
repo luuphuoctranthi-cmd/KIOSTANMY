@@ -1,0 +1,6 @@
+{
+  "name": "Cổng Dịch Vụ Công Phường Tân Mỹ",
+  "description": "Hạ tầng số phục vụ công tác tái cấu trúc quy trình tiếp nhận dịch vụ công trực tuyến toàn trình",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
