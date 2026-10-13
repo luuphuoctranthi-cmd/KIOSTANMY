@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { DEFAULT_SERVICES, DEFAULT_CITIZENS, DEFAULT_SIGNATURES, DEFAULT_AUDIT_LOGS } from './data';
+import { DEFAULT_SERVICES, DEFAULT_CITIZENS, DEFAULT_SIGNATURES, DEFAULT_AUDIT_LOGS, DEFAULT_DOSSIERS, DEFAULT_NOTIFICATIONS } from './data';
 import { PublicService, CitizenProfile, DigitalSignature, Dossier, VneIDNotification, AccessAuditLog } from './types';
 import CitizenPortal from './components/CitizenPortal';
 import OfficerPortal from './components/OfficerPortal';
@@ -9,7 +9,12 @@ import { Shield, Home, Users, Building2, Star, CheckCircle, Clock, FileCheck2, L
 function safeJsonParse<T>(key: string, fallback: T): T {
   try {
     const saved = localStorage.getItem(key);
-    return saved ? JSON.parse(saved) : fallback;
+    if (!saved) return fallback;
+    const parsed = JSON.parse(saved);
+    if (Array.isArray(fallback) && (!Array.isArray(parsed) || parsed.length === 0)) {
+      return fallback;
+    }
+    return parsed;
   } catch {
     return fallback;
   }
@@ -25,12 +30,20 @@ export default function App() {
   const [signatures, setSignatures] = useState<DigitalSignature[]>(() => 
     safeJsonParse('kgov_signatures', DEFAULT_SIGNATURES)
   );
-  const [dossiers, setDossiers] = useState<Dossier[]>(() => 
-    safeJsonParse('kgov_dossiers', [])
-  );
-  const [notifications, setNotifications] = useState<VneIDNotification[]>(() => 
-    safeJsonParse('kgov_notifications', [])
-  );
+  const [dossiers, setDossiers] = useState<Dossier[]>(() => {
+    const savedDossiers = safeJsonParse<Dossier[]>('kgov_dossiers', DEFAULT_DOSSIERS);
+    // Ensure default demo dossier HOS-20260807-8812 is always present if missing
+    if (!savedDossiers.some(d => d.id === 'HOS-20260807-8812')) {
+      return [...DEFAULT_DOSSIERS, ...savedDossiers];
+    }
+    return savedDossiers;
+  });
+  const [notifications, setNotifications] = useState<VneIDNotification[]>(() => {
+    const savedNotifs = safeJsonParse<VneIDNotification[]>('kgov_notifications', DEFAULT_NOTIFICATIONS);
+    // Ensure default demo notifications for Tran Van Nam are present
+    const missingDefaults = DEFAULT_NOTIFICATIONS.filter(dn => !savedNotifs.some(sn => sn.id === dn.id));
+    return missingDefaults.length > 0 ? [...missingDefaults, ...savedNotifs] : savedNotifs;
+  });
   const [auditLogs, setAuditLogs] = useState<AccessAuditLog[]>(() =>
     safeJsonParse('kgov_audit_logs', DEFAULT_AUDIT_LOGS)
   );

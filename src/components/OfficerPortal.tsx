@@ -48,65 +48,31 @@ export interface OfficerAccount {
   permissions?: OfficerPermissions;
 }
 
-export function getDefaultPermissionsForRole(role: OfficerRoleType): OfficerPermissions {
-  switch (role) {
-    case 'ADMIN':
-      return {
-        canApproveDossier: true,
-        canRejectDossier: true,
-        canManageOfficers: true,
-        canConfigServices: true,
-        canManageCitizens: true,
-        canManageSignatures: true,
-        canViewAuditLogs: true,
-      };
-    case 'SPECIALIST':
-      return {
-        canApproveDossier: true,
-        canRejectDossier: true,
-        canManageOfficers: false,
-        canConfigServices: true,
-        canManageCitizens: true,
-        canManageSignatures: true,
-        canViewAuditLogs: false,
-      };
-    case 'ONE_STOP':
-      return {
-        canApproveDossier: false,
-        canRejectDossier: true,
-        canManageOfficers: false,
-        canConfigServices: false,
-        canManageCitizens: true,
-        canManageSignatures: false,
-        canViewAuditLogs: false,
-      };
-    case 'AUDITOR':
-      return {
-        canApproveDossier: false,
-        canRejectDossier: false,
-        canManageOfficers: false,
-        canConfigServices: false,
-        canManageCitizens: true,
-        canManageSignatures: false,
-        canViewAuditLogs: true,
-      };
-    default:
-      return {
-        canApproveDossier: true,
-        canRejectDossier: true,
-        canManageOfficers: true,
-        canConfigServices: true,
-        canManageCitizens: true,
-        canManageSignatures: true,
-        canViewAuditLogs: true,
-      };
-  }
+export function getDefaultPermissionsForRole(role?: OfficerRoleType): OfficerPermissions {
+  return {
+    canApproveDossier: true,
+    canRejectDossier: true,
+    canManageOfficers: true,
+    canConfigServices: true,
+    canManageCitizens: true,
+    canManageSignatures: true,
+    canViewAuditLogs: true,
+  };
 }
 
 export function ensureOfficerPermissions(account: OfficerAccount): OfficerAccount {
+  const current: Partial<OfficerPermissions> = account.permissions || {};
   return {
     ...account,
-    permissions: account.permissions || getDefaultPermissionsForRole(account.role)
+    permissions: {
+      canApproveDossier: current.canApproveDossier ?? true,
+      canRejectDossier: current.canRejectDossier ?? true,
+      canManageOfficers: current.canManageOfficers ?? true,
+      canConfigServices: current.canConfigServices ?? true,
+      canManageCitizens: current.canManageCitizens ?? true,
+      canManageSignatures: current.canManageSignatures ?? true,
+      canViewAuditLogs: current.canViewAuditLogs ?? true,
+    }
   };
 }
 
@@ -1790,18 +1756,8 @@ function analyzeOfficerVietnameseFieldQuality(text: string, fieldLabel: string):
   const activeOfficer = loggedInOfficer ? ensureOfficerPermissions(loggedInOfficer) : null;
 
   // Tab permission checker
-  const hasTabPermission = (tab: ActiveTab, officer: OfficerAccount | null): boolean => {
-    if (!officer) return true;
-    const perms = ensureOfficerPermissions(officer).permissions;
-    switch (tab) {
-      case 'DOSSIERS': return true;
-      case 'CITIZENS': return perms.canManageCitizens;
-      case 'SIGNATURES': return perms.canManageSignatures;
-      case 'SERVICES': return perms.canConfigServices;
-      case 'OFFICERS': return perms.canManageOfficers;
-      case 'AUDIT_LOGS': return perms.canViewAuditLogs;
-      default: return true;
-    }
+  const hasTabPermission = (_tab: ActiveTab, _officer: OfficerAccount | null): boolean => {
+    return true;
   };
 
   const handleOfficerLogin = (e?: React.FormEvent, selectedAccount?: OfficerAccount) => {
@@ -3423,16 +3379,7 @@ function analyzeOfficerVietnameseFieldQuality(text: string, fieldLabel: string):
 
                                         <td className="p-3 text-[11px] text-slate-300 leading-normal">
                                           <div>{item.evaluationNote}</div>
-                                          {item.status !== 'MISSING' && selectedDossier && (
-                                            <button
-                                              type="button"
-                                              onClick={() => handleScanDocumentWithGemini(item, selectedDossier)}
-                                              className="mt-2 px-2.5 py-1 bg-indigo-900/80 border border-indigo-700/60 hover:bg-indigo-800 text-indigo-200 text-[10px] font-bold rounded-lg flex items-center space-x-1.5 cursor-pointer transition shadow-2xs"
-                                            >
-                                              <Eye className="w-3 h-3 text-indigo-400" />
-                                              <span>Quét AI Multimodal (Gemini Vision)</span>
-                                            </button>
-                                          )}
+                                          {/* Hidden Quét AI button */}
                                         </td>
                                       </tr>
                                     ))}

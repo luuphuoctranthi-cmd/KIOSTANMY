@@ -3,7 +3,7 @@ import { GoogleGenAI } from '@google/genai';
 import { motion, AnimatePresence } from 'motion/react';
 import { Mic, MicOff, RefreshCw, LogIn, CheckCircle2, FileText, Upload, Shield, ShieldCheck, Lock, QrCode, User, UserCheck, Scan, Info, Download, AlertCircle, ArrowRight, X, Check, FileCheck2, Send, ExternalLink, Sparkles, Search, Volume2, VolumeX } from 'lucide-react';
 import { PublicService, ServiceField, CitizenProfile, Dossier, DigitalSignature, VneIDNotification, AccessAuditLog, LegalMarriageValidation } from '../types';
-import { VOICE_EXAMPLES, fetchAndRegisterVietnameseFont, drawRedSeal } from '../data';
+import { VOICE_EXAMPLES, fetchAndRegisterVietnameseFont, drawRedSeal, DEFAULT_DOSSIERS } from '../data';
 import { jsPDF } from 'jspdf';
 
 // Helper to strip Vietnamese accents for accent-tolerant searching
@@ -705,9 +705,10 @@ export default function CitizenPortal({
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [submissionReceipt, setSubmissionReceipt] = useState<Dossier | null>(null);
 
-  // Satisfaction Survey states
-  const [selectedRating, setSelectedRating] = useState<'VERY_SATISFIED' | 'SATISFIED' | 'NEUTRAL' | 'DISSATISFIED' | 'VERY_DISSATISFIED' | null>(null);
-  const [feedbackComments, setFeedbackComments] = useState<string>('');
+  // Satisfaction Survey states (keyed by dossierId for absolute reliability)
+  const [selectedRatingsMap, setSelectedRatingsMap] = useState<Record<string, 'VERY_SATISFIED' | 'SATISFIED' | 'NEUTRAL' | 'DISSATISFIED' | 'VERY_DISSATISFIED'>>({});
+  const [feedbackCommentsMap, setFeedbackCommentsMap] = useState<Record<string, string>>({});
+  const [isSubmittingSurvey, setIsSubmittingSurvey] = useState(false);
 
   // Spelling and Typo Control states
   const [showSpellCheckConfirm, setShowSpellCheckConfirm] = useState(false);
@@ -724,6 +725,9 @@ export default function CitizenPortal({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const recognitionRef = useRef<any>(null);
+  const silenceTimerRef = useRef<any>(null);
+  const autoStopTimerRef = useRef<any>(null);
+  const recognizedTextRef = useRef<string>('');
 
   // Voice Assistant states
   const [voiceEnabled, setVoiceEnabled] = useState(true);
@@ -840,39 +844,32 @@ export default function CitizenPortal({
     }
   };
 
-  // Initialize Web Speech Recognition if supported
-  useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const rec = new SpeechRecognition();
-      rec.continuous = false;
-      rec.interimResults = true;
-      rec.lang = 'vi-VN';
-
-      rec.onresult = (event: any) => {
-        const text = event.results[0][0].transcript;
-        if (text) {
-          setRecognizedText(text);
-          if (event.results[0].isFinal) {
-            handleVoiceInput(text);
-            stopDirectRecording();
-          }
-        }
-      };
-
-      rec.onerror = () => {
-        // SpeechRecognition error is handled gracefully because MediaRecorder records raw audio stream directly!
-      };
-
-      recognitionRef.current = rec;
-    }
-  }, []);
+  // Audio feedback chime using Web Audio API
+  const playMicChime = () => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(523.25, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(783.99, ctx.currentTime + 0.12);
+        gain.gain.setValueAtTime(0.12, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.18);
+      }
+    } catch (e) {}
+  };
 
   // Process recorded Audio Blob using Gemini AI Transcription
   const processAudioRecording = async (blob: Blob) => {
     try {
       setIsTranscribing(true);
-      setMicStatus('Đang phân tích khẩu lệnh giọng nói...');
+      setMicStatus('Đang dùng Trí tuệ nhân tạo nhận dạng âm thanh...');
 
       const reader = new FileReader();
       reader.readAsDataURL(blob);
@@ -903,13 +900,13 @@ export default function CitizenPortal({
             console.warn('Server transcribe error, trying client fallback:', serverErr);
           }
 
-          // 2. Client-side fallback with valid model name gemini-3.6-flash
+          // 2. Client-side fallback with valid model gemini-3.5-transcribe
           try {
             const apiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (window as any).GEMINI_API_KEY || (process as any).env?.GEMINI_API_KEY;
             if (apiKey) {
               const ai = new GoogleGenAI({ apiKey });
               const response = await ai.models.generateContent({
-                model: 'gemini-3.6-flash',
+                model: 'gemini-3.5-transcribe',
                 contents: [
                   {
                     role: 'user',
@@ -932,9 +929,8 @@ export default function CitizenPortal({
           }
         }
 
-        // If no text was recognized yet, fallback to prompt or default service
-        if (!recognizedText) {
-          handleVoiceInput("Đăng ký kết hôn trực tuyến");
+        if (!recognizedTextRef.current) {
+          setMicStatus('Chưa nghe rõ khẩu lệnh. Bạn hãy nói lại gần micro hoặc bấm mẫu 1-Click bên dưới.');
         }
         setIsTranscribing(false);
       };
@@ -945,88 +941,154 @@ export default function CitizenPortal({
     }
   };
 
-  // Start Direct Audio Recording
+  // Start Direct Audio Recording & Voice Recognition
   const startDirectRecording = async () => {
     try {
       setRecognizedText('');
+      recognizedTextRef.current = '';
       setDetectedService(null);
       setIsListening(true);
-      setMicStatus('Đang mở Micro thu âm trực tiếp...');
+      setMicStatus('🔴 Đang lắng nghe... Mời bạn nói khẩu lệnh (vd: "Kết hôn", "Khai sinh"...)');
+      playMicChime();
 
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setMicStatus('Trình duyệt không hỗ trợ truy cập Micro. Hãy gõ từ khóa hoặc bấm chọn mẫu bên dưới.');
-        setIsListening(false);
-        return;
-      }
+      let webSpeechStarted = false;
 
-      // Request microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
+      // 1. Web Speech Recognition (native real-time browser speech recognition in Vietnamese)
+      const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognitionClass) {
+        try {
+          const rec = new SpeechRecognitionClass();
+          rec.lang = 'vi-VN';
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.maxAlternatives = 1;
 
-      // Setup Web Audio API Analyser for real-time waveform visualization
-      try {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioCtx) {
-          const audioCtx = new AudioCtx();
-          const source = audioCtx.createMediaStreamSource(stream);
-          const analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 64;
-          source.connect(analyser);
-          audioContextRef.current = audioCtx;
-          analyserRef.current = analyser;
+          rec.onstart = () => {
+            webSpeechStarted = true;
+            setMicStatus('🔴 Micro đã mở! Mời bạn nói (vd: "Kết hôn", "Khai sinh", "Hộ tịch")...');
+          };
 
-          const dataArray = new Uint8Array(analyser.frequencyBinCount);
-          const drawVisualizer = () => {
-            if (analyserRef.current) {
-              analyserRef.current.getByteFrequencyData(dataArray);
-              const sum = dataArray.reduce((acc, v) => acc + v, 0);
-              const avg = sum / dataArray.length;
-              setAudioLevel(Math.min(100, Math.round((avg / 128) * 100)));
-              animFrameRef.current = requestAnimationFrame(drawVisualizer);
+          rec.onresult = (event: any) => {
+            let fullTranscript = '';
+            for (let i = 0; i < event.results.length; ++i) {
+              const part = event.results[i][0]?.transcript || '';
+              fullTranscript += ' ' + part;
+            }
+            const currentText = fullTranscript.trim();
+            if (currentText) {
+              recognizedTextRef.current = currentText;
+              setRecognizedText(currentText);
+              setMicStatus(`Đang nghe: "${currentText}"`);
+
+              // Auto-finalize if user pauses after speaking
+              if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+              silenceTimerRef.current = setTimeout(() => {
+                if (recognizedTextRef.current) {
+                  stopDirectRecording();
+                  handleVoiceInput(recognizedTextRef.current);
+                }
+              }, 1800);
             }
           };
-          drawVisualizer();
-        }
-      } catch (e) {
-        console.warn('AudioContext visualization not available:', e);
-      }
 
-      // MediaRecorder setup
-      audioChunksRef.current = [];
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : MediaRecorder.isTypeSupported('audio/webm')
-        ? 'audio/webm'
-        : MediaRecorder.isTypeSupported('audio/mp4')
-        ? 'audio/mp4'
-        : '';
+          rec.onerror = (e: any) => {
+            console.warn('SpeechRecognition warning:', e?.error);
+            if (e?.error === 'not-allowed') {
+              setMicStatus('Trình duyệt chưa cấp quyền Micro. Vui lòng bấm Cho phép hoặc chọn câu mẫu bên dưới.');
+            }
+          };
 
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          audioChunksRef.current.push(e.data);
-        }
-      };
+          rec.onend = () => {
+            if (recognizedTextRef.current) {
+              handleVoiceInput(recognizedTextRef.current);
+            }
+          };
 
-      recorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-        processAudioRecording(audioBlob);
-      };
-
-      mediaRecorderRef.current = recorder;
-      recorder.start(100);
-
-      // Start WebSpeech in parallel if supported
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.start();
+          recognitionRef.current = rec;
+          rec.start();
+          webSpeechStarted = true;
         } catch (e) {
-          // Ignore
+          console.warn('Web Speech API start error:', e);
         }
       }
 
-      setMicStatus('🔴 Đang thu âm trực tiếp... Hãy nói khẩu lệnh (vd: "Kết hôn", "Khai sinh"...)');
-      speak('Đang thu âm trực tiếp. Mời ông bà phát biểu khẩu lệnh dịch vụ công.');
+      // 2. Setup MediaStream & MediaRecorder (for Visualizer Waveform AND Gemini Audio fallback)
+      try {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          mediaStreamRef.current = stream;
+
+          // Web Audio API Analyser for real-time waveform visualization
+          try {
+            const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+            if (AudioCtx) {
+              const audioCtx = new AudioCtx();
+              const source = audioCtx.createMediaStreamSource(stream);
+              const analyser = audioCtx.createAnalyser();
+              analyser.fftSize = 64;
+              source.connect(analyser);
+              audioContextRef.current = audioCtx;
+              analyserRef.current = analyser;
+
+              const dataArray = new Uint8Array(analyser.frequencyBinCount);
+              const drawVisualizer = () => {
+                if (analyserRef.current) {
+                  analyserRef.current.getByteFrequencyData(dataArray);
+                  const sum = dataArray.reduce((acc, v) => acc + v, 0);
+                  const avg = sum / dataArray.length;
+                  setAudioLevel(Math.min(100, Math.round((avg / 128) * 100)));
+                  animFrameRef.current = requestAnimationFrame(drawVisualizer);
+                }
+              };
+              drawVisualizer();
+            }
+          } catch (e) {
+            console.warn('AudioContext visualization not available:', e);
+          }
+
+          // MediaRecorder setup
+          audioChunksRef.current = [];
+          const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+            ? 'audio/webm;codecs=opus'
+            : MediaRecorder.isTypeSupported('audio/webm')
+            ? 'audio/webm'
+            : MediaRecorder.isTypeSupported('audio/mp4')
+            ? 'audio/mp4'
+            : '';
+
+          const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+          recorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+              audioChunksRef.current.push(e.data);
+            }
+          };
+
+          recorder.onstop = () => {
+            if (!recognizedTextRef.current) {
+              const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+              processAudioRecording(audioBlob);
+            }
+          };
+
+          mediaRecorderRef.current = recorder;
+          recorder.start(100);
+        }
+      } catch (streamErr: any) {
+        console.warn('getUserMedia error:', streamErr);
+        if (!webSpeechStarted) {
+          setIsListening(false);
+          setMicStatus('Chưa mở được Micro. Vui lòng bấm vào các câu mẫu 1-Click bên dưới để thử ngay!');
+        }
+      }
+
+      // Safety limit: auto stop after 10 seconds if no input
+      if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
+      autoStopTimerRef.current = setTimeout(() => {
+        stopDirectRecording();
+        if (recognizedTextRef.current) {
+          handleVoiceInput(recognizedTextRef.current);
+        }
+      }, 10000);
     } catch (err: any) {
       console.error('Microphone error:', err);
       setIsListening(false);
@@ -1038,6 +1100,15 @@ export default function CitizenPortal({
   const stopDirectRecording = () => {
     setIsListening(false);
     setAudioLevel(0);
+
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    if (autoStopTimerRef.current) {
+      clearTimeout(autoStopTimerRef.current);
+      autoStopTimerRef.current = null;
+    }
 
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
@@ -1054,7 +1125,9 @@ export default function CitizenPortal({
     }
 
     if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      try {
+        mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      } catch (e) {}
       mediaStreamRef.current = null;
     }
 
@@ -1067,6 +1140,9 @@ export default function CitizenPortal({
   const toggleListening = () => {
     if (isListening) {
       stopDirectRecording();
+      if (recognizedTextRef.current) {
+        handleVoiceInput(recognizedTextRef.current);
+      }
     } else {
       startDirectRecording();
     }
@@ -1074,23 +1150,27 @@ export default function CitizenPortal({
 
   // Process voice input text
   const handleVoiceInput = (text: string) => {
-    setRecognizedText(text);
-    setIsListening(false);
-    setMicStatus('Đã nhận dạng xong.');
+    const cleanText = text.trim();
+    if (!cleanText) return;
 
-    const cleanInput = removeVietnameseTones(text);
+    setRecognizedText(cleanText);
+    recognizedTextRef.current = cleanText;
+    setIsListening(false);
+    setMicStatus(`Đã nhận dạng xong: "${cleanText}"`);
+
+    const cleanInput = removeVietnameseTones(cleanText);
     let matched: PublicService | null = null;
 
-    // 1. First pass: try exact match on service keywords or name (with and without tones)
+    // 1. First pass: try exact match on service keywords or name
     for (const service of services) {
       const hasKeywordMatch = service.keywords.some(kw => {
         const lowerKw = kw.toLowerCase();
         const cleanKw = removeVietnameseTones(kw);
-        return text.toLowerCase().includes(lowerKw) || cleanInput.includes(cleanKw);
+        return cleanText.toLowerCase().includes(lowerKw) || cleanInput.includes(cleanKw);
       });
 
       const cleanName = removeVietnameseTones(service.name);
-      const nameMatch = text.toLowerCase().includes(service.name.toLowerCase()) || cleanInput.includes(cleanName);
+      const nameMatch = cleanText.toLowerCase().includes(service.name.toLowerCase()) || cleanInput.includes(cleanName);
 
       if (hasKeywordMatch || nameMatch) {
         matched = service;
@@ -1098,13 +1178,24 @@ export default function CitizenPortal({
       }
     }
 
-    // 2. Second pass: fallback to intersection of significant word tokens
+    // 2. Second pass: common synonyms & intent mapping
+    if (!matched) {
+      if (cleanInput.includes('ket hon') || cleanInput.includes('hon nhan') || cleanInput.includes('lay vo') || cleanInput.includes('lay chong') || cleanInput.includes('doc than')) {
+        matched = services.find(s => s.id === 'SRV-MARRIAGE' || s.name.toLowerCase().includes('kết hôn')) || null;
+      } else if (cleanInput.includes('khai sinh') || cleanInput.includes('sinh con') || cleanInput.includes('de con') || cleanInput.includes('giay khai sinh')) {
+        matched = services.find(s => s.id === 'SRV-BIRTH' || s.name.toLowerCase().includes('khai sinh')) || null;
+      } else if (cleanInput.includes('thuong tru') || cleanInput.includes('ho khau') || cleanInput.includes('nhap khau') || cleanInput.includes('cu tru') || cleanInput.includes('tam tru')) {
+        matched = services.find(s => s.id === 'SRV-RESIDENCE' || s.name.toLowerCase().includes('thường trú')) || null;
+      } else if (cleanInput.includes('dat dai') || cleanInput.includes('so do') || cleanInput.includes('so hong') || cleanInput.includes('nha o') || cleanInput.includes('dat cat')) {
+        matched = services.find(s => s.id === 'SRV-LAND' || s.name.toLowerCase().includes('đất đai')) || null;
+      }
+    }
+
+    // 3. Third pass: fallback to token overlap
     if (!matched) {
       for (const service of services) {
         const cleanNameTokens = removeVietnameseTones(service.name).split(/\s+/).filter(t => t.length > 3);
         const inputTokens = cleanInput.split(/\s+/);
-        
-        // Count overlapping words
         const matchCount = cleanNameTokens.filter(token => inputTokens.includes(token)).length;
         if (matchCount >= 2 || (cleanNameTokens.length === 1 && matchCount === 1)) {
           matched = service;
@@ -1115,15 +1206,10 @@ export default function CitizenPortal({
 
     if (matched) {
       setDetectedService(matched);
-      if (!loggedInCitizen) {
-        setShowAuthModal(true);
-        speak(`Hệ thống đã nhận dạng yêu cầu thủ tục: ${matched.name}. Vui lòng xác minh danh tính VNeID trước khi bắt đầu kê khai.`);
-      } else {
-        speak(`Hệ thống đã nhận dạng yêu cầu làm thủ tục: ${matched.name}. Xin mời bạn bấm vào liên kết nhấp nháy trên màn hình để mở ngay biểu mẫu.`);
-      }
+      speak(`Hệ thống đã nhận dạng yêu cầu làm thủ tục: ${matched.name}. Xin mời bạn bấm vào liên kết nhấp nháy trên màn hình để mở ngay biểu mẫu.`);
     } else {
       setDetectedService(null);
-      speak("Hệ thống chưa tìm thấy thủ tục hành chính phù hợp với yêu cầu của bạn. Vui lòng thử phát biểu lại rõ ràng hơn.");
+      speak("Hệ thống chưa tìm thấy thủ tục hành chính phù hợp với yêu cầu của bạn. Vui lòng phát biểu lại rõ ràng hơn hoặc chọn các mẫu câu có sẵn.");
       setMicStatus('Thiết bị sẵn sàng. Vui lòng nhấn micro và thử lại.');
     }
   };
@@ -1700,15 +1786,22 @@ const stripAccents = (str: string): string => {
   };
 
   const submitSurvey = (dossierId: string, rating: any, comments: string) => {
+    if (!rating) {
+      alert("Vui lòng chọn một mức độ đánh giá sự hài lòng.");
+      return;
+    }
+    setIsSubmittingSurvey(true);
+    const nowStr = new Date().toLocaleString('vi-VN');
+    const isSentToLeader = rating === 'DISSATISFIED' || rating === 'VERY_DISSATISFIED';
+
     const updatedDossiers = dossiers.map(d => {
       if (d.id === dossierId) {
-        const isSentToLeader = rating === 'DISSATISFIED' || rating === 'VERY_DISSATISFIED';
         return {
           ...d,
           feedback: {
             rating,
-            comments,
-            submittedAt: new Date().toLocaleString('vi-VN'),
+            comments: comments || '',
+            submittedAt: nowStr,
             isSentToLeader
           }
         };
@@ -1716,16 +1809,28 @@ const stripAccents = (str: string): string => {
       return d;
     });
     onUpdateDossiers(updatedDossiers);
-    
-    if (rating === 'DISSATISFIED' || rating === 'VERY_DISSATISFIED') {
-      alert("📬 [BÁO CÁO LÃNH ĐẠO CẤP TRÊN] Hệ thống đã ghi nhận phản hồi KHÔNG HÀI LÒNG của bạn và tự động gửi tin nhắn SMS/VNeID trực tiếp đến số máy của Lãnh đạo cấp trên (Chủ tịch UBND Quận/Huyện) để kiểm điểm, xử lý thái độ công vụ của cán bộ tiếp dân.");
+
+    // Provide friendly voice confirmation and alert
+    if (isSentToLeader) {
+      speak("Hệ thống đã tiếp nhận ý kiến đóng góp chưa hài lòng của bạn và chuyển tiếp khẩn tới Lãnh đạo Quận để xử lý.");
+      alert("📬 [BÁO CÁO LÃNH ĐẠO CẤP TRÊN] Hệ thống đã ghi nhận phản hồi KHÔNG HÀI LÒNG của bạn và tự động chuyển thông tin trực tiếp đến số máy của Lãnh đạo cấp trên (Chủ tịch UBND Quận/Huyện) để kiểm điểm, xử lý thái độ công vụ của cán bộ tiếp dân.");
     } else {
+      speak("Xin cảm ơn bạn đã gửi đánh giá hài lòng về dịch vụ công trực tuyến của ủy ban nhân dân phường Tân Mỹ.");
       alert("✓ Xin cảm ơn bạn đã gửi đánh giá sự hài lòng về chất lượng dịch vụ công trực tuyến của UBND Phường Tân Mỹ.");
     }
     
-    // Reset state
-    setSelectedRating(null);
-    setFeedbackComments('');
+    // Clean up local draft for this dossier
+    setSelectedRatingsMap(prev => {
+      const next = { ...prev };
+      delete next[dossierId];
+      return next;
+    });
+    setFeedbackCommentsMap(prev => {
+      const next = { ...prev };
+      delete next[dossierId];
+      return next;
+    });
+    setIsSubmittingSurvey(false);
   };
 
   return (
@@ -1993,135 +2098,193 @@ const stripAccents = (str: string): string => {
                   const matchingDossier = dossiers.find(d => d.id === n.dossierId);
                   const hasFeedback = !!matchingDossier?.feedback;
                   
-                  return (
-                    <div key={n.id} className="bg-white border border-amber-100 rounded-xl p-3 text-xs space-y-3 shadow-xs text-left">
-                      <div className="flex justify-between items-start gap-3">
-                        <div className="space-y-1">
-                          <p className="font-extrabold text-gray-800 flex items-center space-x-1">
-                            <span>{n.title}</span>
-                          </p>
-                          <p className="text-gray-600 leading-relaxed font-medium">{n.content}</p>
-                          <p className="text-[10px] text-gray-400 font-bold">{n.timestamp}</p>
-                        </div>
-                        {n.downloadUrl && (
+                    const currentRating = selectedRatingsMap[n.dossierId] || null;
+                    const currentComment = feedbackCommentsMap[n.dossierId] || '';
+
+                    return (
+                      <div key={n.id} className="bg-white border border-amber-200/80 rounded-xl p-3.5 text-xs space-y-3 shadow-2xs text-left transition hover:border-amber-300">
+                        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-2.5">
+                          <div className="space-y-1 flex-1">
+                            <p className="font-extrabold text-slate-800 flex items-center space-x-1.5">
+                              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                              <span>{n.title}</span>
+                            </p>
+                            <p className="text-slate-600 leading-relaxed font-medium">{n.content}</p>
+                            <div className="flex items-center space-x-2 pt-0.5">
+                              <span className="text-[10px] text-slate-400 font-mono font-bold">{n.timestamp}</span>
+                              <span className="text-[9px] bg-slate-100 text-slate-600 font-mono px-1.5 py-0.5 rounded font-bold">Mã hồ sơ: {n.dossierId}</span>
+                            </div>
+                          </div>
+
+                          {/* Quick Action Button: View signed document & Red Seal */}
                           <button
+                            type="button"
                             onClick={() => {
-                              if (matchingDossier && matchingDossier.status === 'APPROVED') {
+                              if (matchingDossier) {
                                 setViewingSignedDossier(matchingDossier);
                               } else {
-                                alert(`Kết quả hồ sơ đang được đồng bộ hóa an toàn. Vui lòng thử lại sau giây lát.`);
+                                // Fallback: build approved dossier directly from default record
+                                const fallbackDossier = DEFAULT_DOSSIERS.find(d => d.id === n.dossierId) || {
+                                  id: n.dossierId,
+                                  serviceId: 'SRV-MARRIAGE',
+                                  serviceName: 'Đăng ký kết hôn trực tuyến',
+                                  citizenCccd: loggedInCitizen.cccd,
+                                  citizenName: loggedInCitizen.fullName,
+                                  submittedAt: n.timestamp,
+                                  status: 'APPROVED' as const,
+                                  digitalSigned: true,
+                                  formData: {
+                                    husband_name: loggedInCitizen.fullName,
+                                    husband_cccd: loggedInCitizen.cccd,
+                                    wife_name: "Trần Thị Mai Phương",
+                                    wife_cccd: "990000000003"
+                                  },
+                                  uploadedFiles: [],
+                                  officerResponse: {
+                                    responseText: "Ủy ban nhân dân phường Tân Mỹ đã phê duyệt hồ sơ dịch vụ công trực tuyến toàn trình hợp lệ.",
+                                    responseFile: `trich_luc_${n.dossierId}.pdf`,
+                                    approvedAt: n.timestamp,
+                                    decisionNumber: "14/2026/TLKH-UBND",
+                                    signerName: "Trần Minh Hải",
+                                    signerTitle: "Chủ tịch Ủy ban",
+                                    hasRedSeal: true,
+                                    hasSignature: true
+                                  }
+                                };
+                                setViewingSignedDossier(fallbackDossier);
                               }
                             }}
-                            className="flex items-center space-x-1 text-emerald-600 hover:text-emerald-700 font-bold text-[11px] shrink-0 bg-emerald-50 hover:bg-emerald-100/70 py-1 px-2.5 rounded-lg transition"
+                            className="flex items-center justify-center space-x-1.5 text-emerald-700 hover:text-emerald-800 font-extrabold text-xs shrink-0 bg-emerald-50 hover:bg-emerald-100/90 border border-emerald-200 py-1.5 px-3 rounded-lg transition cursor-pointer shadow-2xs"
                           >
-                            <Download className="w-3.5 h-3.5" />
-                            <span>Xem kết quả số</span>
+                            <FileCheck2 className="w-4 h-4 text-emerald-600" />
+                            <span>Xem kết quả số & Mộc đỏ</span>
                           </button>
-                        )}
-                      </div>
+                        </div>
 
-                      {/* Survey Widget if dossier is approved */}
-                      {matchingDossier && matchingDossier.status === 'APPROVED' && (
-                        <div className="border-t border-dashed border-slate-100 pt-3 mt-1 bg-slate-50/60 p-2.5 rounded-lg space-y-2 text-left">
-                          {hasFeedback ? (
-                            <div className="flex items-center space-x-1.5 text-emerald-700 font-bold bg-emerald-50 p-2 rounded border border-emerald-100">
-                              <Check className="w-4 h-4 text-emerald-600 shrink-0" />
-                              <div className="text-[10px]">
-                                <p>Đã hoàn thành khảo sát mức độ hài lòng!</p>
-                                <p className="font-normal text-slate-500 mt-0.5">Mức độ: <span className="font-bold text-slate-700">{
-                                  matchingDossier.feedback?.rating === 'VERY_SATISFIED' ? '🤩 Rất hài lòng' :
-                                  matchingDossier.feedback?.rating === 'SATISFIED' ? '😊 Hài lòng' :
-                                  matchingDossier.feedback?.rating === 'NEUTRAL' ? '😐 Bình thường' :
-                                  matchingDossier.feedback?.rating === 'DISSATISFIED' ? '😟 Không hài lòng' : '😡 Rất không hài lòng'
-                                }</span> {matchingDossier.feedback?.comments ? ` - "${matchingDossier.feedback?.comments}"` : ''}</p>
-                                {matchingDossier.feedback?.isSentToLeader && (
-                                  <span className="text-[9px] bg-red-100 text-red-800 px-1.5 py-0.5 rounded mt-1 inline-block font-extrabold uppercase">
-                                    📬 Đã chuyển tin phản ánh trực tiếp đến Lãnh đạo Quận
+                        {/* Survey Widget if dossier is approved or notification indicates approval */}
+                        {(matchingDossier?.status === 'APPROVED' || n.type === 'success' || n.title.includes('phê duyệt')) && (
+                          <div className="border-t border-dashed border-amber-200 pt-3 mt-2 bg-gradient-to-br from-amber-50/60 to-orange-50/40 p-3 rounded-xl space-y-2.5 text-left border border-amber-100">
+                            {hasFeedback ? (
+                              <div className="flex items-center space-x-2 text-emerald-800 font-bold bg-emerald-50 p-2.5 rounded-lg border border-emerald-200">
+                                <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                                <div className="text-[11px] leading-relaxed">
+                                  <p className="font-extrabold text-emerald-900">✓ Đã hoàn thành khảo sát mức độ hài lòng!</p>
+                                  <p className="font-normal text-slate-600 mt-0.5">
+                                    Đánh giá: <span className="font-bold text-slate-900">{
+                                      matchingDossier.feedback?.rating === 'VERY_SATISFIED' ? '🤩 Rất hài lòng' :
+                                      matchingDossier.feedback?.rating === 'SATISFIED' ? '😊 Hài lòng' :
+                                      matchingDossier.feedback?.rating === 'NEUTRAL' ? '😐 Bình thường' :
+                                      matchingDossier.feedback?.rating === 'DISSATISFIED' ? '😟 Không hài lòng' : '😡 Rất không hài lòng'
+                                    }</span>
+                                    {matchingDossier.feedback?.comments ? ` — "${matchingDossier.feedback.comments}"` : ''}
+                                  </p>
+                                  {matchingDossier.feedback?.isSentToLeader && (
+                                    <span className="text-[10px] bg-rose-100 text-rose-800 border border-rose-200 px-2 py-0.5 rounded mt-1.5 inline-block font-extrabold uppercase">
+                                      📬 Đã chuyển tin phản ánh trực tiếp đến Lãnh đạo UBND Quận
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="space-y-3">
+                                <div className="flex items-center justify-between">
+                                  <p className="font-extrabold text-slate-800 uppercase tracking-wider text-[11px] flex items-center space-x-1.5">
+                                    <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                                    <span>Đánh giá sự hài lòng về dịch vụ công trực tuyến (UBND Phường Tân Mỹ):</span>
+                                  </p>
+                                  <span className="text-[10px] text-amber-800 font-bold bg-amber-100 px-2 py-0.5 rounded-full">
+                                    Khảo sát trực tuyến
                                   </span>
+                                </div>
+
+                                {/* Rating Options Buttons */}
+                                <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                                  {[
+                                    { rating: 'VERY_SATISFIED', label: '🤩 Rất hài lòng' },
+                                    { rating: 'SATISFIED', label: '😊 Hài lòng' },
+                                    { rating: 'NEUTRAL', label: '😐 Bình thường' },
+                                    { rating: 'DISSATISFIED', label: '😟 Không hài lòng' },
+                                    { rating: 'VERY_DISSATISFIED', label: '😡 Rất không hài lòng' },
+                                  ].map(item => (
+                                    <button
+                                      key={item.rating}
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedRatingsMap(prev => ({
+                                          ...prev,
+                                          [n.dossierId]: item.rating as any
+                                        }));
+                                      }}
+                                      className={`py-2 px-2 rounded-xl border text-xs font-bold text-center transition cursor-pointer flex items-center justify-center ${
+                                        currentRating === item.rating
+                                          ? 'bg-amber-600 border-amber-600 text-white shadow-sm ring-2 ring-amber-300'
+                                          : 'bg-white hover:bg-amber-50 border-slate-200 text-slate-700 shadow-2xs'
+                                      }`}
+                                    >
+                                      {item.label}
+                                    </button>
+                                  ))}
+                                </div>
+
+                                {currentRating && (
+                                  <div className="space-y-2 pt-1 animate-fade-in">
+                                    {(currentRating === 'DISSATISFIED' || currentRating === 'VERY_DISSATISFIED') && (
+                                      <div className="bg-rose-50 border border-rose-200 rounded-xl p-2.5 space-y-1 text-left">
+                                        <p className="font-bold text-rose-800 text-[11px] uppercase flex items-center space-x-1.5">
+                                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                                          <span>Gửi báo cáo trực tiếp đến Lãnh đạo cấp trên:</span>
+                                        </p>
+                                        <p className="text-[11px] text-slate-600 leading-relaxed font-medium">
+                                          Ý kiến phản hồi không hài lòng kèm nội dung góp ý sẽ được chuyển tiếp qua hệ thống mật tới <strong>Lãnh đạo UBND phường & Lãnh đạo Quận</strong> để chấn chỉnh công tác phục vụ nhân dân.
+                                        </p>
+                                      </div>
+                                    )}
+                                    
+                                    <div className="space-y-1">
+                                      <label className="block text-[11px] font-bold text-slate-700">
+                                        {currentRating === 'DISSATISFIED' || currentRating === 'VERY_DISSATISFIED'
+                                          ? 'Nhập nội dung phản ánh, lý do chưa hài lòng (Bắt buộc):'
+                                          : 'Ý kiến đóng góp thêm để cải tiến dịch vụ (Không bắt buộc):'}
+                                      </label>
+                                      <textarea
+                                        rows={2}
+                                        value={currentComment}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          setFeedbackCommentsMap(prev => ({
+                                            ...prev,
+                                            [n.dossierId]: val
+                                          }));
+                                        }}
+                                        placeholder={currentRating === 'DISSATISFIED' || currentRating === 'VERY_DISSATISFIED'
+                                          ? "Vui lòng mô tả cụ thể lý do không hài lòng hoặc sự chậm trễ..."
+                                          : "Nhập ý kiến đóng góp ý kiến nâng cao chất lượng phục vụ..."}
+                                        className="w-full bg-white border border-slate-300 rounded-xl p-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500 text-xs shadow-2xs"
+                                      />
+                                    </div>
+
+                                    <div className="flex justify-end pt-1">
+                                      <button
+                                        type="button"
+                                        disabled={
+                                          isSubmittingSurvey ||
+                                          ((currentRating === 'DISSATISFIED' || currentRating === 'VERY_DISSATISFIED') && !currentComment.trim())
+                                        }
+                                        onClick={() => submitSurvey(n.dossierId, currentRating, currentComment)}
+                                        className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-extrabold px-5 py-2 rounded-xl text-xs transition cursor-pointer flex items-center space-x-1.5 shadow-sm"
+                                      >
+                                        <Check className="w-3.5 h-3.5" />
+                                        <span>Gửi đánh giá & Đồng bộ kết quả</span>
+                                      </button>
+                                    </div>
+                                  </div>
                                 )}
                               </div>
-                            </div>
-                          ) : (
-                            <div className="space-y-3">
-                              <p className="font-extrabold text-slate-700 uppercase tracking-wider text-[10px] flex items-center space-x-1">
-                                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                                <span>Khảo sát sự hài lòng về dịch vụ công trực tuyến phường Tân Mỹ:</span>
-                              </p>
-                              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
-                                {[
-                                  { rating: 'VERY_SATISFIED', label: '🤩 Rất hài lòng' },
-                                  { rating: 'SATISFIED', label: '😊 Hài lòng' },
-                                  { rating: 'NEUTRAL', label: '😐 Bình thường' },
-                                  { rating: 'DISSATISFIED', label: '😟 Không hài lòng' },
-                                  { rating: 'VERY_DISSATISFIED', label: '😡 Rất không hài lòng' },
-                                ].map(item => (
-                                  <button
-                                    key={item.rating}
-                                    type="button"
-                                    onClick={() => {
-                                      setSelectedRating(item.rating as any);
-                                    }}
-                                    className={`py-1.5 px-1 rounded-lg border text-[10px] font-bold text-center transition cursor-pointer ${
-                                      selectedRating === item.rating
-                                        ? 'bg-amber-600 border-amber-600 text-white shadow-xs'
-                                        : 'bg-white hover:bg-amber-50 border-slate-200 text-slate-700'
-                                    }`}
-                                  >
-                                    {item.label}
-                                  </button>
-                                ))}
-                              </div>
-
-                              {selectedRating && (
-                                <div className="space-y-2">
-                                  {(selectedRating === 'DISSATISFIED' || selectedRating === 'VERY_DISSATISFIED') && (
-                                    <div className="bg-rose-50 border border-rose-100 rounded-lg p-2.5 space-y-1">
-                                      <p className="font-bold text-rose-800 text-[10px] uppercase flex items-center space-x-1">
-                                        <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                                        <span>Gửi báo cáo trực tiếp đến Lãnh đạo cấp trên:</span>
-                                      </p>
-                                      <p className="text-[10px] text-slate-500 leading-relaxed font-medium">
-                                        Ý kiến phản hồi không hài lòng kèm nội dung góp ý dưới đây sẽ được gửi trực tiếp qua hệ thống mật tới **Lãnh đạo UBND phường & Lãnh đạo Quận** để tiến hành chấn chỉnh công tác phục vụ nhân dân của cán bộ.
-                                      </p>
-                                    </div>
-                                  )}
-                                  
-                                  <div className="space-y-1">
-                                    <label className="block text-[10px] font-bold text-slate-600">
-                                      {selectedRating === 'DISSATISFIED' || selectedRating === 'VERY_DISSATISFIED'
-                                        ? 'Nhập nội dung phản ánh, lý do chưa hài lòng (Bắt buộc):'
-                                        : 'Ý kiến đóng góp thêm để cải tiến dịch vụ (Không bắt buộc):'}
-                                    </label>
-                                    <textarea
-                                      rows={2}
-                                      value={feedbackComments}
-                                      onChange={(e) => setFeedbackComments(e.target.value)}
-                                      placeholder={selectedRating === 'DISSATISFIED' || selectedRating === 'VERY_DISSATISFIED'
-                                        ? "Vui lòng mô tả cụ thể lý do không hài lòng hoặc sự chậm trễ của cán bộ..."
-                                        : "Nhập ý kiến đóng góp cải tiến..."}
-                                      className="w-full bg-white border border-slate-200 rounded-lg p-2 text-slate-800 focus:outline-none focus:border-amber-500 text-xs"
-                                    />
-                                  </div>
-
-                                  <div className="flex justify-end pt-1">
-                                    <button
-                                      type="button"
-                                      disabled={(selectedRating === 'DISSATISFIED' || selectedRating === 'VERY_DISSATISFIED') && !feedbackComments.trim()}
-                                      onClick={() => submitSurvey(n.dossierId, selectedRating, feedbackComments)}
-                                      className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-extrabold px-4 py-1.5 rounded-lg text-[10px] transition cursor-pointer flex items-center space-x-1"
-                                    >
-                                      <Check className="w-3 h-3" />
-                                      <span>Gửi đánh giá & Đồng bộ</span>
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
                 })
             )}
           </div>
@@ -2212,6 +2375,47 @@ const stripAccents = (str: string): string => {
                 {micStatus}
               </span>
             </div>
+
+            {/* Live Real-time Speech Transcription Display */}
+            {(isListening || recognizedText) && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className={`mt-2.5 w-full max-w-md p-3 rounded-2xl border text-center transition-all ${
+                  isListening
+                    ? 'bg-gradient-to-r from-red-50 via-rose-50 to-amber-50 border-red-300 shadow-sm'
+                    : 'bg-emerald-50/95 border-emerald-300 shadow-2xs'
+                }`}
+              >
+                <div className="flex items-center justify-center gap-1.5 mb-1">
+                  {isListening ? (
+                    <>
+                      <span className="w-2.5 h-2.5 bg-red-600 rounded-full animate-ping" />
+                      <span className="text-[11px] font-black text-red-700 uppercase tracking-wider">
+                        Đang lắng nghe trực tiếp • Mời bạn nói
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      <span className="text-[11px] font-black text-emerald-700 uppercase tracking-wider">
+                        Đã ghi nhận khẩu lệnh
+                      </span>
+                    </>
+                  )}
+                </div>
+                <div className="min-h-[2rem] flex items-center justify-center px-3 py-1 bg-white/95 rounded-xl border border-slate-200/80 shadow-2xs">
+                  <p className="text-xs sm:text-sm font-extrabold text-slate-900">
+                    {recognizedText ? `"${recognizedText}"` : 'Đang đợi giọng nói của bạn... Hãy nói "Khai sinh", "Kết hôn"...'}
+                  </p>
+                </div>
+                {isListening && (
+                  <p className="text-[10px] text-slate-500 mt-1 font-medium">
+                    (Nói xong bạn chỉ cần dừng 1-2 giây hoặc nhấn "Dừng thu", hệ thống sẽ tự phân tích)
+                  </p>
+                )}
+              </motion.div>
+            )}
 
             {/* Instant AI Blinking & Glowing Link Card - Placed directly here so user never needs to scroll */}
             {detectedService && (

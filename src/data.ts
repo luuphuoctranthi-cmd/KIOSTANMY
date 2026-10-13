@@ -1,4 +1,69 @@
-import { CitizenProfile, PublicService, DigitalSignature, AccessAuditLog } from './types';
+import { CitizenProfile, PublicService, DigitalSignature, AccessAuditLog, Dossier, VneIDNotification } from './types';
+
+export const DEFAULT_DOSSIERS: Dossier[] = [
+  {
+    id: "HOS-20260807-8812",
+    serviceId: "SRV-MARRIAGE",
+    serviceName: "Đăng ký kết hôn trực tuyến",
+    citizenCccd: "990000000001",
+    citizenName: "Trần Văn Nam",
+    submittedAt: "2026-08-07 09:20:10",
+    isReceived: true,
+    receivedAt: "2026-08-07 09:25:00",
+    status: "APPROVED",
+    digitalSigned: true,
+    formData: {
+      husband_name: "Trần Văn Nam",
+      husband_cccd: "990000000001",
+      husband_dob: "2001-07-06",
+      wife_name: "Trần Thị Mai Phương",
+      wife_cccd: "990000000003",
+      wife_dob: "2005-09-30",
+      proof_marital_status: "giay_xac_nhan_doc_than_tran_van_nam.pdf"
+    },
+    uploadedFiles: [
+      {
+        fieldId: "proof_marital_status",
+        fileName: "giay_xac_nhan_doc_than_tran_van_nam.pdf",
+        fileUrl: "#"
+      }
+    ],
+    officerResponse: {
+      responseText: "Ủy ban nhân dân phường Tân Mỹ đã thụ lý, thẩm định cơ sở dữ liệu quốc gia về dân cư VNeID và phê duyệt Trích lục Giấy chứng nhận kết hôn điện tử hợp lệ.",
+      responseFile: "trich_luc_ket_hon_HOS-20260807-8812.pdf",
+      approvedAt: "2026-08-07 09:35:45",
+      officerSignatureId: "SIG-OFFICER",
+      decisionNumber: "14/2026/TLKH-UBND",
+      signerName: "Trần Minh Hải",
+      signerTitle: "Chủ tịch Ủy ban",
+      hasRedSeal: true,
+      hasSignature: true
+    }
+  }
+];
+
+export const DEFAULT_NOTIFICATIONS: VneIDNotification[] = [
+  {
+    id: "NOT-8812-APP",
+    citizenCccd: "990000000001",
+    title: "✓ Hồ sơ đã được phê duyệt thành công - HOS-20260807-8812",
+    content: "Kết quả xử lý hồ sơ thủ tục 'Đăng ký kết hôn trực tuyến' đã được phê duyệt chính thức và đóng dấu mộc đỏ điện tử bởi UBND Phường Tân Mỹ. Bạn có thể nhấn 'Xem kết quả số' để tra cứu chi tiết và tải file giấy chứng nhận.",
+    timestamp: "2026-08-07 09:35:45",
+    type: "success",
+    dossierId: "HOS-20260807-8812",
+    downloadUrl: "#download_result"
+  },
+  {
+    id: "NOT-8812-RCV",
+    citizenCccd: "990000000001",
+    title: "📢 Hồ sơ đã được tiếp nhận - HOS-20260807-8812",
+    content: "Kính gửi công dân Trần Văn Nam: Hồ sơ thủ tục 'Đăng ký kết hôn trực tuyến' của bạn đã được cán bộ tư pháp phường Tân Mỹ tiếp nhận thành công vào lúc 2026-08-07 09:25:00 và đã chuyển sang bước thẩm định, phê duyệt.",
+    timestamp: "2026-08-07 09:25:00",
+    type: "info",
+    dossierId: "HOS-20260807-8812",
+    downloadUrl: "#download_result"
+  }
+];
 
 export const DEFAULT_AUDIT_LOGS: AccessAuditLog[] = [
   {

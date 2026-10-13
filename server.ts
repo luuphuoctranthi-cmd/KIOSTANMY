@@ -71,24 +71,45 @@ async function startServer() {
         },
       });
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.6-flash",
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { inlineData: { mimeType: mimeType || "audio/webm", data: base64Data } },
-              {
-                text:
-                  prompt ||
-                  'Hãy nghe đoạn âm thanh tiếng Việt này và trích xuất ngắn gọn khẩu lệnh thủ tục hành chính mà người dân đang muốn làm (ví dụ: "Đăng ký kết hôn", "Đăng ký khai sinh", "Cấp giấy xác nhận tình trạng hôn nhân", "Đăng ký thường trú", "Cấp bản sao trích lục", ...). Chỉ trả về câu nói hoặc tên thủ tục, không kèm lời giải thích.',
-              },
-            ],
-          },
-        ],
-      });
-
-      const transcribed = response.text?.trim() || "";
+      let transcribed = "";
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-3.5-transcribe",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { inlineData: { mimeType: mimeType || "audio/webm", data: base64Data } },
+                {
+                  text:
+                    prompt ||
+                    'Hãy nghe đoạn âm thanh tiếng Việt này và trích xuất ngắn gọn khẩu lệnh thủ tục hành chính mà người dân đang muốn làm (ví dụ: "Đăng ký kết hôn", "Đăng ký khai sinh", "Cấp giấy xác nhận tình trạng hôn nhân", "Đăng ký thường trú", "Cấp bản sao trích lục", ...). Chỉ trả về câu nói hoặc tên thủ tục, không kèm lời giải thích.',
+                },
+              ],
+            },
+          ],
+        });
+        transcribed = response.text?.trim() || "";
+      } catch (transcribeErr: any) {
+        console.warn("gemini-3.5-transcribe error, fallback to gemini-3.8-flash:", transcribeErr?.message);
+        const fallbackResponse = await ai.models.generateContent({
+          model: "gemini-3.8-flash",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { inlineData: { mimeType: mimeType || "audio/webm", data: base64Data } },
+                {
+                  text:
+                    prompt ||
+                    'Hãy nghe đoạn âm thanh tiếng Việt này và trích xuất ngắn gọn khẩu lệnh thủ tục hành chính mà người dân đang muốn làm (ví dụ: "Đăng ký kết hôn", "Đăng ký khai sinh", "Cấp giấy xác nhận tình trạng hôn nhân", "Đăng ký thường trú", "Cấp bản sao trích lục", ...). Chỉ trả về câu nói hoặc tên thủ tục, không kèm lời giải thích.',
+                },
+              ],
+            },
+          ],
+        });
+        transcribed = fallbackResponse.text?.trim() || "";
+      }
       return res.json({ text: transcribed });
     } catch (error: any) {
       console.error("Gemini audio transcription error:", error);
